@@ -116,6 +116,24 @@ describe("parse_svn_uri", function()
         local p = parse_svn_uri("/svn/demo1/!svn/mystery/foo", "/svn")
         assert.is_true(p.legacy)
     end)
+
+    it("ignores the revision number -- authorization is always against current rules", function()
+        -- There is no per-revision dimension to the rules at all (the accs
+        -- cache file has no history), so the revision number in !svn/rvr and
+        -- !svn/ver URIs must never affect the derived path -- confirmed
+        -- against a reference config that achieves the same property
+        -- deliberately (rewriting away the revision number before checking
+        -- authorization), citing the same real risk: without this, an old
+        -- cached/pinned revision number could be used to probe or bypass
+        -- rules that only exist in the current access file.
+        local old_rev = parse_svn_uri("/svn/demo1/!svn/rvr/1/trunk/file.txt", "/svn")
+        local new_rev = parse_svn_uri("/svn/demo1/!svn/rvr/999999/trunk/file.txt", "/svn")
+        assert.are.equal(old_rev.path, new_rev.path)
+
+        local old_ver = parse_svn_uri("/svn/demo1/!svn/ver/1/trunk/file.txt", "/svn")
+        local new_ver = parse_svn_uri("/svn/demo1/!svn/ver/999999/trunk/file.txt", "/svn")
+        assert.are.equal(old_ver.path, new_ver.path)
+    end)
 end)
 
 describe("strip_scheme_host", function()
@@ -291,9 +309,14 @@ describe("access_needed_for_method", function()
         assert.are.equal(recursive, needed.recursive)
     end
 
+    -- OPTIONS and MERGE are deliberately absent from every case below: in
+    -- real dispatch, authz_check_access() never even calls this function
+    -- for them (see EXEMPT_METHODS) -- they're always permitted once
+    -- authenticated, with no role check at all. See the "authz_check_access"
+    -- describe block for the test proving that exemption end to end.
+
     it("maps read methods to non-recursive read", function()
         assert_needed("GET", false, false)
-        assert_needed("OPTIONS", false, false)
         assert_needed("PROPFIND", false, false)
         assert_needed("REPORT", false, false)
     end)
@@ -312,7 +335,6 @@ describe("access_needed_for_method", function()
         assert_needed("PUT", true, false)
         assert_needed("PROPPATCH", true, false)
         assert_needed("CHECKOUT", true, false)
-        assert_needed("MERGE", true, false)
         assert_needed("MKACTIVITY", true, false)
         assert_needed("LOCK", true, false)
         assert_needed("UNLOCK", true, false)
@@ -340,7 +362,11 @@ describe("authz_check_access", function()
     -- against /trunk that also touches /trunk/locked exercises the
     -- recursive-descendant check in isolation from the destination-write
     -- check, which is exercised separately (readers never has write access
-    -- anywhere in this fixture).
+    -- anywhere in this fixture). /access.accs mirrors the real-world
+    -- pattern that motivated this fixture shape: a reference OpenIDC-based
+    -- config in production restricts write (and, there, also read) on the
+    -- access file itself to admin-only roles, which is exactly the kind of
+    -- nested override the recursive-descendant walk exists to catch.
     setup(function()
         os.execute("mkdir -p " .. accs_dir)
         local f = io.open(accs_dir .. "/demo1.accs", "w")
@@ -351,6 +377,10 @@ describe("authz_check_access", function()
 
 [/trunk/locked]
 @developers =
+
+[/access.accs]
+@readers =
+@developers = rw
 ]])
         f:close()
     end)
@@ -365,6 +395,17 @@ describe("authz_check_access", function()
 
     it("allows a read the caller's role grants", function()
         local r = make_request("GET", "/svn/demo1/trunk/file.txt", env("readers"))
+        assert.are.equal(OK, authz_check_access(r))
+    end)
+
+    it("allows OPTIONS for an authenticated caller with no role grant at all", function()
+        -- OPTIONS is exempt from role checks entirely (see EXEMPT_METHODS)
+        -- -- capability negotiation reveals no repository content, and this
+        -- module never sees a truly unauthenticated request anyway (Apache's
+        -- own authentication phase runs first). env(nil) has no role claim
+        -- whatsoever, so this only passes if OPTIONS is genuinely exempt,
+        -- not merely coincidentally permitted by some role.
+        local r = make_request("OPTIONS", "/svn/demo1/trunk/file.txt", env(nil))
         assert.are.equal(OK, authz_check_access(r))
     end)
 
@@ -406,6 +447,23 @@ describe("authz_check_access", function()
         -- denies them, which must fail the recursive check even though a
         -- non-recursive check on /trunk alone would pass.
         assert.are.equal(HTTP_FORBIDDEN, authz_check_access(r))
+    end)
+
+    it("recursive read of the whole tree is denied for a role excluded only at /access.accs", function()
+        -- The concrete real-world shape that started this review: a role
+        -- (readers) has plain read at the root and everywhere else, but
+        -- /access.accs -- an ordinary nested override, no different in kind
+        -- from /trunk/locked above -- excludes it entirely. A non-recursive
+        -- read anywhere else must be unaffected; only a recursive operation
+        -- spanning the whole tree (like a COPY of the repository root) has
+        -- to notice the exclusion and fail. Uses check_access() directly,
+        -- not a full COPY request, specifically to isolate this from the
+        -- unrelated fact that readers also has no write grant anywhere --
+        -- see the destination-write-failure case above for that.
+        local rules = load_rules(accs_dir, "demo1")
+        local roles = parse_roles("readers")
+        assert.is_true(check_access(rules, "/", roles, { write = false, recursive = false }))
+        assert.is_false(check_access(rules, "/", roles, { write = false, recursive = true }))
     end)
 
     it("denies COPY whose destination write fails, even with readable source", function()

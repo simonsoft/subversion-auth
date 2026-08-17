@@ -100,7 +100,16 @@ access-file section nested under the source (for `COPY`'s read check) or
 destination (write, for both `COPY` and `MOVE`) path must also grant the
 required access, not just the top-level path -- otherwise copying a
 directory could expose content from a nested path the caller can't actually
-read.
+read. This is checked fresh at request time, not precomputed -- there's no
+separate "copy" permission tier distinct from `r`/`rw`; a role that can
+recursively copy a subtree is simply a role for which every section in that
+subtree grants (at least) read.
+
+`OPTIONS` and `MERGE` never require a role grant, only that the caller is
+authenticated at all (enforced by Apache before this module ever runs) --
+`OPTIONS` is capability negotiation and reveals no repository content;
+`MERGE` finalizes a commit whose per-path writes were already checked as
+they happened, on the preceding `!svn/txr/...` requests.
 
 ## In-repo access file
 

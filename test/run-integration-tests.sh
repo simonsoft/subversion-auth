@@ -85,6 +85,7 @@ dex sh -c 'cat > /tmp/seed/access.accs <<EOF
 
 [/trunk/locked]
 @developers =
+@readers =
 EOF'
 dex sh -c 'echo "hello" > /tmp/seed/trunk/file.txt'
 dex sh -c 'echo "secret" > /tmp/seed/trunk/locked/secret.txt'
@@ -101,6 +102,12 @@ fi
 echo "==> Read access"
 code="$(status_as readeruser readpass GET http://localhost/svn/demo1/trunk/file.txt)"
 [ "$code" = "200" ] && pass "readeruser can GET a readable file" || fail "readeruser GET expected 200, got $code"
+
+echo "==> OPTIONS exemption (no role required, only authentication)"
+code="$(status_as readeruser readpass GET http://localhost/svn/demo1/trunk/locked/secret.txt)"
+[ "$code" = "403" ] && pass "readeruser GET of an unreadable path is denied (sanity check)" || fail "expected 403, got $code"
+code="$(status_as readeruser readpass OPTIONS http://localhost/svn/demo1/trunk/locked/secret.txt)"
+[ "$code" = "200" ] && pass "readeruser OPTIONS on that same unreadable path still succeeds" || fail "expected 200, got $code"
 
 echo "==> Write access (commit workflow, exercises !svn/me + !svn/txr)"
 dex rm -rf /tmp/wc-dev /tmp/wc-reader

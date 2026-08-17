@@ -248,18 +248,35 @@ function check_access(rules, path, roles, opts)
     return true
 end
 
-local READ_METHODS = { GET = true, OPTIONS = true, PROPFIND = true, REPORT = true }
+local READ_METHODS = { GET = true, PROPFIND = true, REPORT = true }
 local WRITE_METHODS = {
     MKCOL = true, PUT = true, PROPPATCH = true, CHECKOUT = true,
-    MERGE = true, MKACTIVITY = true, LOCK = true, UNLOCK = true,
+    MKACTIVITY = true, LOCK = true, UNLOCK = true,
 }
 local RECURSIVE_WRITE_METHODS = { MOVE = true, DELETE = true }
 
+-- OPTIONS (capability negotiation -- reveals no repository content) and
+-- MERGE (finalizes a commit whose per-path writes were already checked on
+-- !svn/txr/... as they happened) never require a role grant, only that the
+-- caller is authenticated at all -- which this module doesn't itself
+-- enforce; that already happened in Apache's authentication phase, strictly
+-- before the auth_checker phase this hook runs in, so by the time either of
+-- these reaches authz_check_access() the caller is already a valid user.
+-- Confirmed against a reference OpenIDC/mod_rewrite config already used in
+-- production for this same role-claim approach, which grants both
+-- unconditionally to any authenticated user (`Require valid-user` with no
+-- `RequireAny`) -- and against real ra_serf client behavior: its first
+-- request in a session (typically OPTIONS) is sent without credentials and
+-- expects a 401-then-retry, not an outright 403 from a role it doesn't
+-- have merely for asking what the server supports.
+local EXEMPT_METHODS = { OPTIONS = true, MERGE = true }
+
 -- Method -> access-type mapping, verified against mod_authz_svn.c's
--- req_check_access(). COPY is the odd one out: it needs recursive *read*
--- on its source (this function's result), while its Destination header
--- target always needs recursive *write*, checked separately in
--- authz_check_access() below.
+-- req_check_access() (mod_authz_svn itself does gate OPTIONS on the read
+-- role, unlike this module's deliberate EXEMPT_METHODS choice above). COPY
+-- is the odd one out: it needs recursive *read* on its source (this
+-- function's result), while its Destination header target always needs
+-- recursive *write*, checked separately in authz_check_access() below.
 function access_needed_for_method(method)
     if method == "COPY" then
         return { write = false, recursive = true }
@@ -310,7 +327,7 @@ function authz_check_access(r)
     local roles = parse_roles(r.subprocess_env[roles_var])
 
     local ok = true
-    if parsed.path ~= nil then
+    if parsed.path ~= nil and not EXEMPT_METHODS[r.method] then
         ok = check_access(rules, parsed.path, roles, access_needed_for_method(r.method))
     end
 
