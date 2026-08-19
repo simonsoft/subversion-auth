@@ -503,3 +503,90 @@ describe("authz_check_access", function()
         assert.are.equal(OK, authz_check_access(r))
     end)
 end)
+
+describe("authz_check_access with the '*' wildcard role", function()
+    local accs_dir = spec_dir() .. "fixtures"
+
+    -- "*" grants read to literally any caller at the root (no claim needed
+    -- at all -- see env(nil) below), including one holding some unrelated
+    -- real role, since parse_roles() always injects "*" into every caller's
+    -- role set regardless of their actual claims. /private then revokes it
+    -- with "* =" (empty value, an explicit deny, not merely "unmentioned")
+    -- -- the same mechanism used to revoke any other role's inherited
+    -- grant, just applied to the wildcard -- while admin keeps an explicit
+    -- grant there that survives the wildcard's revocation.
+    setup(function()
+        os.execute("mkdir -p " .. accs_dir)
+        local f = io.open(accs_dir .. "/wildcard-demo.accs", "w")
+        f:write([[
+[/]
+* = r
+@admin = rw
+
+[/private]
+* =
+@admin = rw
+]])
+        f:close()
+    end)
+
+    teardown(function()
+        os.remove(accs_dir .. "/wildcard-demo.accs")
+    end)
+
+    local function env(roles)
+        return { AUTHZ_LUA_ACCS_DIR = accs_dir, AUTHZ_LUA_ROLES_VAR = "AUTHZ_LUA_ROLES", AUTHZ_LUA_ROLES = roles }
+    end
+
+    it("grants read at the root to a caller with no role claim at all", function()
+        local r = make_request("GET", "/svn/wildcard-demo/file.txt", env(nil))
+        assert.are.equal(OK, authz_check_access(r))
+    end)
+
+    it("grants read at the root to a caller holding some unrelated real role", function()
+        -- Proves "*" matches regardless of which roles the caller actually
+        -- has, not just the no-claim-at-all case above.
+        local r = make_request("GET", "/svn/wildcard-demo/file.txt", env("somebody-else"))
+        assert.are.equal(OK, authz_check_access(r))
+    end)
+
+    it("does not grant write at the root -- '*' was only ever given 'r'", function()
+        local r = make_request("PUT", "/svn/wildcard-demo/file.txt", env(nil))
+        assert.are.equal(HTTP_FORBIDDEN, authz_check_access(r))
+    end)
+
+    it("'* =' revokes the wildcard's inherited grant at a nested path", function()
+        local r = make_request("GET", "/svn/wildcard-demo/private/file.txt", env(nil))
+        assert.are.equal(HTTP_FORBIDDEN, authz_check_access(r))
+    end)
+
+    it("an explicit role grant at that same nested path survives the wildcard revocation", function()
+        local r = make_request("GET", "/svn/wildcard-demo/private/file.txt", env("admin"))
+        assert.are.equal(OK, authz_check_access(r))
+    end)
+
+    it("recursive COPY of the root is denied for a wildcard-only caller because of the nested revocation", function()
+        -- Mirrors the /access.accs recursive-descendant case above, but for
+        -- the wildcard specifically: a non-recursive read of the root
+        -- succeeds via "*", yet copying the whole tree must notice that
+        -- /private revoked "*" and fail, even though the caller never held
+        -- any role beyond the wildcard to begin with.
+        local r = make_request(
+            "COPY",
+            "/svn/wildcard-demo/!svn/rvr/5/",
+            env(nil),
+            { Destination = "/svn/wildcard-demo/!svn/txr/0-a/whole-tree-copy" }
+        )
+        assert.are.equal(HTTP_FORBIDDEN, authz_check_access(r))
+    end)
+
+    it("recursive COPY of the root succeeds for admin, who has an explicit grant throughout", function()
+        local r = make_request(
+            "COPY",
+            "/svn/wildcard-demo/!svn/rvr/5/",
+            env("admin"),
+            { Destination = "/svn/wildcard-demo/!svn/txr/0-a/whole-tree-copy" }
+        )
+        assert.are.equal(OK, authz_check_access(r))
+    end)
+end)

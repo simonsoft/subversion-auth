@@ -78,17 +78,35 @@ EOF'
 
 echo "==> Seeding initial content (access.accs, trunk/file.txt, trunk/locked/secret.txt)"
 dex mkdir -p /tmp/seed/trunk/locked
+dex mkdir -p /tmp/seed/wildcard-only/revoked
+# wildcard-only: readeruser's own "readers" role is revoked here, so any
+# read they get is coming purely from the "* = r" grant inherited from
+# root. wildcard-only/revoked: readers stays revoked (unmentioned, so it
+# just keeps inheriting the "" from its parent) but "*" is now ALSO
+# explicitly revoked -- the only thing that changes between these two
+# nested levels is the wildcard's own state, isolating that "* =" really is
+# what removes access readeruser otherwise had one level up.
 dex sh -c 'cat > /tmp/seed/access.accs <<EOF
 [/]
 @readers = r
 @developers = rw
+* = r
 
 [/trunk/locked]
 @developers =
 @readers =
+* =
+
+[/wildcard-only]
+@readers =
+
+[/wildcard-only/revoked]
+* =
 EOF'
 dex sh -c 'echo "hello" > /tmp/seed/trunk/file.txt'
 dex sh -c 'echo "secret" > /tmp/seed/trunk/locked/secret.txt'
+dex sh -c 'echo "via wildcard" > /tmp/seed/wildcard-only/file.txt'
+dex sh -c 'echo "not via wildcard" > /tmp/seed/wildcard-only/revoked/file.txt'
 dex svn import -q --non-interactive --username devuser --password devpass \
     /tmp/seed http://localhost/svn/demo1 -m "seed"
 
@@ -108,6 +126,18 @@ code="$(status_as readeruser readpass GET http://localhost/svn/demo1/trunk/locke
 [ "$code" = "403" ] && pass "readeruser GET of an unreadable path is denied (sanity check)" || fail "expected 403, got $code"
 code="$(status_as readeruser readpass OPTIONS http://localhost/svn/demo1/trunk/locked/secret.txt)"
 [ "$code" = "200" ] && pass "readeruser OPTIONS on that same unreadable path still succeeds" || fail "expected 200, got $code"
+
+echo "==> '*' wildcard role, against a real server"
+# readeruser's own "readers" role is explicitly revoked under /wildcard-only,
+# so any read they get there is coming purely from "* = r" at the root.
+code="$(status_as readeruser readpass GET http://localhost/svn/demo1/wildcard-only/file.txt)"
+[ "$code" = "200" ] && pass "readeruser reads via '*' alone, with their own role revoked" || fail "expected 200, got $code"
+# One level deeper, "*" is also explicitly revoked ("* ="); readers stays
+# revoked (unmentioned, so it keeps inheriting). The only thing that
+# changed between these two nested levels is the wildcard's own state, so
+# this isolates that "* =" is what removes the access granted above.
+code="$(status_as readeruser readpass GET http://localhost/svn/demo1/wildcard-only/revoked/file.txt)"
+[ "$code" = "403" ] && pass "'* =' revokes that wildcard-only access one level down" || fail "expected 403, got $code"
 
 echo "==> Write access (commit workflow, exercises !svn/me + !svn/txr)"
 dex rm -rf /tmp/wc-dev /tmp/wc-reader
