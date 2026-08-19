@@ -121,6 +121,17 @@ echo "==> Read access"
 code="$(status_as readeruser readpass GET http://localhost/svn/demo1/trunk/file.txt)"
 [ "$code" = "200" ] && pass "readeruser can GET a readable file" || fail "readeruser GET expected 200, got $code"
 
+echo "==> Query string on the request URI"
+# Apache splits the query string out of r.uri before any module (including
+# mod_lua) ever sees it -- r.uri is always just the decoded path -- but
+# this is worth pinning down explicitly against a real server rather than
+# just trusting that, especially for a URL shape (repo root + query
+# string) real clients/tools genuinely send.
+code="$(status_as readeruser readpass GET "http://localhost/svn/demo1/?rweb=e.mkdir")"
+[ "$code" = "200" ] && pass "a query string on the repo root doesn't affect authorization" || fail "expected 200, got $code"
+code="$(status_as readeruser readpass GET "http://localhost/svn/demo1/trunk/locked/secret.txt?rweb=e.mkdir")"
+[ "$code" = "403" ] && pass "a query string doesn't bypass a denial either" || fail "expected 403, got $code"
+
 echo "==> OPTIONS exemption (no role required, only authentication)"
 code="$(status_as readeruser readpass GET http://localhost/svn/demo1/trunk/locked/secret.txt)"
 [ "$code" = "403" ] && pass "readeruser GET of an unreadable path is denied (sanity check)" || fail "expected 403, got $code"
