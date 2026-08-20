@@ -1,0 +1,56 @@
+#!/bin/sh
+# Exports the in-repo access file (default: /access.accs) to
+# "$AUTHZ_LUA_ACCS_DIR/<reponame>.accs" whenever a commit touches it, since
+# mod-lua/svn-authz.lua has no libsvn bindings and can only read the current
+# rules from a plain file on local disk -- this hook is what keeps that file
+# in sync with the versioned in-repo source of truth. Install as
+# <repos>/hooks/post-commit (or call it from an existing post-commit hook
+# with the same $1 REPOS-PATH / $2 REV arguments Subversion passes).
+#
+# A brand-new repository needs one manual bootstrap step before its very
+# first commit: with no cache file yet, svn-authz.lua finds no rules and
+# fails closed (denies everything, including the commit that would add the
+# access file in the first place -- there's no way around this chicken-and-
+# egg problem from inside the module itself). Write an initial
+# "$AUTHZ_LUA_ACCS_DIR/<reponame>.accs" by hand (granting whoever will run
+# the first commit write access) before committing anything; every commit
+# after that keeps it in sync automatically via this hook, including the
+# commit that adds /access.accs itself, at which point the hand-written
+# bootstrap file gets overwritten with the real in-repo content.
+#
+# Note: Apache's `SetEnv` is request-scoped and does not reach hook
+# subprocesses -- mod_dav_svn/svnserve invoke hooks with a near-empty
+# environment by design. If a deployment overrides AUTHZ_LUA_ACCESS_PATH or
+# AUTHZ_LUA_ACCS_DIR away from the defaults below via SetEnv, the same
+# values must also be exported here (or via a wrapper) so this hook and
+# svn-authz.lua agree on where the file lives.
+set -eu
+
+REPOS="$1"
+REV="$2"
+
+ACCESS_PATH="${AUTHZ_LUA_ACCESS_PATH:-/access.accs}"
+ACCS_DIR="${AUTHZ_LUA_ACCS_DIR:-/var/lib/subversion-auth/accs}"
+
+# svnlook paths are repos-root-relative without a leading slash.
+CHANGED_PATH="${ACCESS_PATH#/}"
+
+if ! svnlook changed -r "$REV" "$REPOS" | grep -qE "^[AUD].  ${CHANGED_PATH}\$"; then
+    exit 0
+fi
+
+REPO_NAME="$(basename "$REPOS")"
+TMP_FILE="$ACCS_DIR/.${REPO_NAME}.accs.tmp.$$"
+
+mkdir -p "$ACCS_DIR"
+
+if ! svnlook cat -r "$REV" "$REPOS" "$ACCESS_PATH" > "$TMP_FILE" 2>/dev/null; then
+    # access.accs was deleted in this revision -- remove the cached copy so
+    # a stale (or now-nonexistent) file doesn't keep being enforced.
+    rm -f "$TMP_FILE"
+    rm -f "$ACCS_DIR/${REPO_NAME}.accs"
+    exit 0
+fi
+
+# Atomic replace: svn-authz.lua must never observe a partially-written file.
+mv "$TMP_FILE" "$ACCS_DIR/${REPO_NAME}.accs"
