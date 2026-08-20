@@ -366,6 +366,13 @@ describe("access_needed_for_method", function()
 
     it("maps read methods to non-recursive read", function()
         assert_needed("GET", false, false)
+        -- HEAD is grouped with GET deliberately: Apache's C-level
+        -- method_number has no separate HEAD constant (httpd represents it
+        -- as M_GET plus a header_only flag), but r.method in mod_lua is
+        -- the literal request-line string, not that unified numeric ID --
+        -- confirmed empirically, a HEAD request was wrongly denied to a
+        -- read-only role until this was added.
+        assert_needed("HEAD", false, false)
         assert_needed("PROPFIND", false, false)
         assert_needed("REPORT", false, false)
     end)
@@ -444,6 +451,11 @@ describe("authz_check_access", function()
 
     it("allows a read the caller's role grants", function()
         local r = make_request("GET", "/svn/demo1/trunk/file.txt", env("readers"))
+        assert.are.equal(OK, authz_check_access(r))
+    end)
+
+    it("treats HEAD the same as GET for a read-only role", function()
+        local r = make_request("HEAD", "/svn/demo1/trunk/file.txt", env("readers"))
         assert.are.equal(OK, authz_check_access(r))
     end)
 

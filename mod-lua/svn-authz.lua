@@ -269,7 +269,15 @@ function check_access(rules, path, roles, opts)
     return true
 end
 
-local READ_METHODS = { GET = true, PROPFIND = true, REPORT = true }
+-- HEAD is deliberately grouped with GET: Apache's C-level method_number
+-- has no separate constant for HEAD at all -- per RFC 7231 it's "GET
+-- without a response body," and httpd represents it as M_GET plus a
+-- header_only flag, so mod_authz_svn's own method-number switch treats
+-- them identically for free. r.method in mod_lua, by contrast, is the
+-- literal request-line string, not that unified numeric ID -- confirmed
+-- empirically (a HEAD request fell through to the write+recursive default
+-- and was wrongly denied to a read-only role, until HEAD was added here).
+local READ_METHODS = { GET = true, HEAD = true, PROPFIND = true, REPORT = true }
 local WRITE_METHODS = {
     MKCOL = true, PUT = true, PROPPATCH = true, CHECKOUT = true,
     MKACTIVITY = true, LOCK = true, UNLOCK = true,

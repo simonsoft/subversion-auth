@@ -125,6 +125,15 @@ fi
 echo "==> Read access"
 code="$(status_as readeruser readpass GET http://localhost/svn/demo1/trunk/file.txt)"
 [ "$code" = "200" ] && pass "readeruser can GET a readable file" || fail "readeruser GET expected 200, got $code"
+# HEAD has no separate method_number in Apache's C code (httpd represents
+# it as M_GET plus header_only), but r.method in mod_lua is the literal
+# request-line string -- without explicitly grouping HEAD with GET, this
+# fell through to the write+recursive default and was wrongly denied.
+# Uses curl's dedicated --head/-I rather than status_as's generic -X HEAD:
+# curl still expects a body matching Content-Length with -X HEAD and errors
+# (exit 18) on the correctly-empty HEAD response; -I handles that properly.
+code="$(dex curl -s -o /dev/null -w '%{http_code}' -I -u readeruser:readpass http://localhost/svn/demo1/trunk/file.txt)"
+[ "$code" = "200" ] && pass "readeruser can also HEAD that same file" || fail "readeruser HEAD expected 200, got $code"
 
 echo "==> Query string on the request URI"
 # Apache splits the query string out of r.uri before any module (including
