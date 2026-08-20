@@ -214,29 +214,6 @@ describe("parse_roles", function()
     end)
 end)
 
-describe("resolve_permission", function()
-    local rules = parse_access_file([[
-[/]
-@readers = r
-@developers = rw
-
-[/trunk/locked]
-@developers = r
-]])
-
-    it("uses the root grant when no deeper section mentions the role", function()
-        assert.are.equal("rw", resolve_permission(rules, "/trunk/anything", "developers"))
-    end)
-
-    it("lets a deeper section override for the role it explicitly mentions", function()
-        assert.are.equal("r", resolve_permission(rules, "/trunk/locked", "developers"))
-    end)
-
-    it("returns nil for a role never mentioned", function()
-        assert.is_nil(resolve_permission(rules, "/trunk", "nobody"))
-    end)
-end)
-
 describe("permission_meets", function()
     it("treats an unmentioned role (nil) as no access", function()
         assert.is_false(permission_meets(nil, false))
@@ -262,10 +239,82 @@ describe("permission_meets", function()
 end)
 
 describe("best_permission", function()
-    it("combines multiple role memberships, taking the most permissive", function()
+    it("combines multiple role memberships at the winning section, taking the most permissive", function()
         local rules = parse_access_file("[/]\n@readers = r\n@developers = rw\n")
         local roles = parse_roles("readers,developers")
         assert.are.equal("rw", best_permission(rules, "/", roles))
+    end)
+
+    it("falls through to an ancestor when the more specific section mentions none of the caller's roles", function()
+        local rules = parse_access_file([[
+[/]
+@developers = rw
+
+[/locked]
+@qa = r
+]])
+        local roles = parse_roles("developers")
+        -- /locked's own section exists, but nothing in it matches this
+        -- caller (they hold neither "qa" nor anything else mentioned
+        -- there), so it's transparent to them -- resolution continues up
+        -- to "/" as if /locked's section didn't exist for this caller.
+        assert.are.equal("rw", best_permission(rules, "/locked", roles))
+    end)
+
+    it("a role's ancestor grant is shadowed by a DIFFERENT role mentioned at a more specific section", function()
+        -- The regression case: developers is never mentioned at /locked at
+        -- all (not even to deny it) -- only readers is. Real mod_authz_svn
+        -- does not maintain independent per-role inheritance chains: once
+        -- ANY of the caller's roles is mentioned at the more specific
+        -- section, that section wins outright for the caller, and their
+        -- OTHER roles' grants further up are never consulted, even though
+        -- those other roles were never individually touched.
+        local rules = parse_access_file([[
+[/]
+@developers = rw
+
+[/locked]
+@readers =
+]])
+        local roles = parse_roles("developers,readers")
+        assert.is_nil(best_permission(rules, "/locked", roles))
+    end)
+
+    it("'*' alone is enough to shadow an ancestor grant, since it matches every caller", function()
+        -- The exact scenario verified against a real mod_authz_svn
+        -- instance: "harry = rw" at "/", only "* =" at "/locked" (harry
+        -- not mentioned there at all) -> harry is denied at /locked.
+        local rules = parse_access_file([[
+[/]
+@developers = rw
+
+[/locked]
+* =
+]])
+        local roles = parse_roles("developers")
+        assert.is_nil(best_permission(rules, "/locked", roles))
+    end)
+
+    it("an explicit deny still counts as a match, blocking fallback, even though it grants nothing itself", function()
+        -- Same shape as above, but isolates that even a role the caller
+        -- DOES hold, denied by name, blocks fallback for their OTHER
+        -- roles too -- not just that "something unrelated was mentioned."
+        local rules = parse_access_file([[
+[/]
+@developers = rw
+@readers = r
+
+[/locked]
+@readers =
+]])
+        local roles = parse_roles("developers,readers")
+        assert.is_nil(best_permission(rules, "/locked", roles))
+    end)
+
+    it("returns nil when nothing from the target path up to the root matches any of the caller's roles", function()
+        local rules = parse_access_file("[/]\n@developers = rw\n")
+        local roles = parse_roles("someone-else")
+        assert.is_nil(best_permission(rules, "/anything", roles))
     end)
 end)
 
@@ -514,7 +563,11 @@ describe("authz_check_access with the '*' wildcard role", function()
     -- with "* =" (empty value, an explicit deny, not merely "unmentioned")
     -- -- the same mechanism used to revoke any other role's inherited
     -- grant, just applied to the wildcard -- while admin keeps an explicit
-    -- grant there that survives the wildcard's revocation.
+    -- grant there that survives the wildcard's revocation. editor is
+    -- granted only at the root, never restated at /private at all -- this
+    -- is what actually pins down the fix: "*" alone at /private is enough
+    -- to shadow editor's grant, even though editor itself is never
+    -- individually mentioned (denied or otherwise) at /private.
     setup(function()
         os.execute("mkdir -p " .. accs_dir)
         local f = io.open(accs_dir .. "/wildcard-demo.accs", "w")
@@ -522,6 +575,7 @@ describe("authz_check_access with the '*' wildcard role", function()
 [/]
 * = r
 @admin = rw
+@editor = rw
 
 [/private]
 * =
@@ -562,6 +616,23 @@ describe("authz_check_access with the '*' wildcard role", function()
 
     it("an explicit role grant at that same nested path survives the wildcard revocation", function()
         local r = make_request("GET", "/svn/wildcard-demo/private/file.txt", env("admin"))
+        assert.are.equal(OK, authz_check_access(r))
+    end)
+
+    it("a role granted only at the root is shadowed by '*' at /private, though it's never mentioned there", function()
+        -- This is the actual regression case: editor's rw comes only from
+        -- "/" and is never touched, granted, or denied by name anywhere
+        -- under /private. Under the old (wrong) independent-per-role model
+        -- this would have passed, since editor's own chain was never
+        -- overridden. Under the real algorithm, "*" alone matching at
+        -- /private is enough to win and block fallback for every caller,
+        -- editor included.
+        local r = make_request("GET", "/svn/wildcard-demo/private/file.txt", env("editor"))
+        assert.are.equal(HTTP_FORBIDDEN, authz_check_access(r))
+    end)
+
+    it("that same role still has its root-level grant outside /private", function()
+        local r = make_request("GET", "/svn/wildcard-demo/file.txt", env("editor"))
         assert.are.equal(OK, authz_check_access(r))
     end)
 

@@ -78,14 +78,19 @@ EOF'
 
 echo "==> Seeding initial content (access.accs, trunk/file.txt, trunk/locked/secret.txt)"
 dex mkdir -p /tmp/seed/trunk/locked
-dex mkdir -p /tmp/seed/wildcard-only/revoked
-# wildcard-only: readeruser's own "readers" role is revoked here, so any
-# read they get is coming purely from the "* = r" grant inherited from
-# root. wildcard-only/revoked: readers stays revoked (unmentioned, so it
-# just keeps inheriting the "" from its parent) but "*" is now ALSO
-# explicitly revoked -- the only thing that changes between these two
-# nested levels is the wildcard's own state, isolating that "* =" really is
-# what removes access readeruser otherwise had one level up.
+dex mkdir -p /tmp/seed/wildcard-open/revoked
+# wildcard-open and wildcard-open/revoked mention ONLY "*" -- never
+# readeruser's own "readers" role, not even to deny it -- so whatever
+# access readeruser gets in either of these two directories is
+# unambiguously coming from "*" alone, isolating its real effect. (An
+# earlier version of this fixture also explicitly revoked "readers" by
+# name, which happened to produce the same pass/fail outcome either way
+# and so didn't actually distinguish real mod_authz_svn's behavior from a
+# plausible-but-wrong alternative -- real mod_authz_svn does not maintain
+# independent per-role inheritance chains: the first path section (walking
+# from the target up to root) that mentions ANY of the caller's roles,
+# including "*", wins outright and blocks fallback for ALL of their roles,
+# not just the one that matched.)
 dex sh -c 'cat > /tmp/seed/access.accs <<EOF
 [/]
 @readers = r
@@ -97,16 +102,16 @@ dex sh -c 'cat > /tmp/seed/access.accs <<EOF
 @readers =
 * =
 
-[/wildcard-only]
-@readers =
+[/wildcard-open]
+* = r
 
-[/wildcard-only/revoked]
+[/wildcard-open/revoked]
 * =
 EOF'
 dex sh -c 'echo "hello" > /tmp/seed/trunk/file.txt'
 dex sh -c 'echo "secret" > /tmp/seed/trunk/locked/secret.txt'
-dex sh -c 'echo "via wildcard" > /tmp/seed/wildcard-only/file.txt'
-dex sh -c 'echo "not via wildcard" > /tmp/seed/wildcard-only/revoked/file.txt'
+dex sh -c 'echo "via wildcard" > /tmp/seed/wildcard-open/file.txt'
+dex sh -c 'echo "not via wildcard" > /tmp/seed/wildcard-open/revoked/file.txt'
 dex svn import -q --non-interactive --username devuser --password devpass \
     /tmp/seed http://localhost/svn/demo1 -m "seed"
 
@@ -139,15 +144,17 @@ code="$(status_as readeruser readpass OPTIONS http://localhost/svn/demo1/trunk/l
 [ "$code" = "200" ] && pass "readeruser OPTIONS on that same unreadable path still succeeds" || fail "expected 200, got $code"
 
 echo "==> '*' wildcard role, against a real server"
-# readeruser's own "readers" role is explicitly revoked under /wildcard-only,
-# so any read they get there is coming purely from "* = r" at the root.
-code="$(status_as readeruser readpass GET http://localhost/svn/demo1/wildcard-only/file.txt)"
-[ "$code" = "200" ] && pass "readeruser reads via '*' alone, with their own role revoked" || fail "expected 200, got $code"
-# One level deeper, "*" is also explicitly revoked ("* ="); readers stays
-# revoked (unmentioned, so it keeps inheriting). The only thing that
-# changed between these two nested levels is the wildcard's own state, so
-# this isolates that "* =" is what removes the access granted above.
-code="$(status_as readeruser readpass GET http://localhost/svn/demo1/wildcard-only/revoked/file.txt)"
+# /wildcard-open mentions ONLY "*" -- readeruser's own "readers" role isn't
+# mentioned there at all, not even to deny it -- so any read they get is
+# unambiguously coming from "* = r" alone.
+code="$(status_as readeruser readpass GET http://localhost/svn/demo1/wildcard-open/file.txt)"
+[ "$code" = "200" ] && pass "readeruser reads via '*' alone" || fail "expected 200, got $code"
+# One level deeper, "*" is explicitly revoked ("* ="), again with no
+# mention of "readers" at all. Real mod_authz_svn does not maintain
+# independent per-role inheritance chains: this "*" entry alone is enough
+# to win over root's grant and block fallback for every caller, including
+# ones whose own specific role was never touched here.
+code="$(status_as readeruser readpass GET http://localhost/svn/demo1/wildcard-open/revoked/file.txt)"
 [ "$code" = "403" ] && pass "'* =' revokes that wildcard-only access one level down" || fail "expected 403, got $code"
 
 echo "==> Write access (commit workflow, exercises !svn/me + !svn/txr)"

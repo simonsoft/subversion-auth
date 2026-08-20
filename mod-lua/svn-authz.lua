@@ -178,35 +178,56 @@ function parse_roles(claim_value)
     return roles
 end
 
--- Resolves the effective permission ("r", "rw", or nil) for a single role
--- at `path`, by walking every section that is an ancestor of (or equal to)
--- `path` in shallow-to-deep order and letting a deeper section's explicit
--- grant for that role override a shallower one -- standard SVN authz
--- parent-to-child inheritance, per role.
-function resolve_permission(rules, path, role)
-    local perm = nil
-    for _, section in ipairs(rules) do
-        if path_is_ancestor(section.path, path) and section.grants[role] ~= nil then
-            perm = section.grants[role]
-        end
-    end
-    return perm
-end
-
--- Combines resolve_permission() across every role the caller holds, taking
--- the most permissive result -- matching SVN authz's rule that group
--- memberships combine rather than override each other.
+-- Resolves the effective permission ("r", "rw", "" for an explicit deny, or
+-- nil for no access at all) for a caller holding `roles` at `path`.
+--
+-- This is NOT independent per-role inheritance -- that was this module's
+-- original (wrong) model, disproven by testing against a real
+-- mod_authz_svn: with "harry = rw" at "/" and only "* =" at "/locked"
+-- (harry not mentioned there at all), a request from harry to "/locked"
+-- is DENIED, even though his own root grant is never touched by name.
+--
+-- The real algorithm, confirmed against libsvn_repos/authz.c's actual
+-- matching code and that live test: walk from `path` up toward the root,
+-- through each explicitly configured section (deepest first -- `rules` is
+-- sorted shallow-to-deep by parse_access_file, so this walks it in
+-- reverse). At the FIRST section that mentions ANY role in `roles` --
+-- including "*", and including as an explicit empty/deny entry -- that
+-- section wins outright: combine (most permissive wins) just the roles
+-- that are mentioned THERE, and stop. Shallower sections are never
+-- consulted again, even for roles the winning section didn't mention.
+--
+-- The practical consequence: a role's grant at an ancestor path can be
+-- silently shadowed by a DIFFERENT role (or "*") merely being mentioned --
+-- for any reason, including to deny it -- at a more specific path, even
+-- when the first role is never individually named there. That's exactly
+-- what makes "* =" work as a revocation: "*" matches every caller, so its
+-- mere presence at a path is enough to win and block fallback for
+-- everyone, regardless of what any of their other roles would otherwise
+-- have been granted higher up.
 function best_permission(rules, path, roles)
-    local best = nil
-    for role, _ in pairs(roles) do
-        local perm = resolve_permission(rules, path, role)
-        if perm == "rw" then
-            return "rw"
-        elseif perm == "r" then
-            best = "r"
+    for i = #rules, 1, -1 do
+        local section = rules[i]
+        if path_is_ancestor(section.path, path) then
+            local matched = false
+            local best = nil
+            for role, _ in pairs(roles) do
+                local val = section.grants[role]
+                if val ~= nil then
+                    matched = true
+                    if val == "rw" then
+                        best = "rw"
+                    elseif val == "r" and best ~= "rw" then
+                        best = "r"
+                    end
+                end
+            end
+            if matched then
+                return best
+            end
         end
     end
-    return best
+    return nil
 end
 
 -- perm is nil when no matching section ever mentioned the role, or "" when

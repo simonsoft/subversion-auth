@@ -88,14 +88,29 @@ developers = developers
 
 `@developers = rw` grants read+write to any caller whose role-claim list
 (the comma-separated value of `AUTHZ_LUA_ROLES_VAR`) contains `developers`.
-`@developers =` (no value) is an explicit deny, overriding an ancestor
-section's grant for that role -- standard SVN authz syntax, distinct from
-the role simply not being mentioned (which inherits from the nearest
-ancestor section that does mention it). `*` always matches, for
-world-readable/writable paths that don't require any specific claim.
+`@developers =` (no value) is an explicit deny -- standard SVN authz syntax,
+distinct from the role simply not being mentioned at all. `*` always
+matches, for world-readable/writable paths that don't require any specific
+claim.
 
-Permissions granted to different roles at the same path combine (the most
-permissive applies), and `COPY`/`MOVE` are checked **recursively**: every
+Path resolution is **not** independent per role, and this is worth
+understanding precisely, since it's the opposite of what seems intuitive at
+first (confirmed against a real `mod_authz_svn` instance, not just docs):
+for a given caller, find the single most specific path section (starting at
+the target path and walking up toward `/`) that mentions *any* role they
+hold -- including `*`, and including as an explicit deny -- and that
+section is authoritative for them, full stop. Their other roles' grants at
+less specific paths are never consulted once a more specific section
+mentions any of their roles, even ones that section doesn't itself mention.
+Concretely: `@developers = rw` at `/`, and only `* =` at
+`/trunk/vendor-drop` (not mentioning `developers` at all) still denies a
+`developers`-role caller at `/trunk/vendor-drop` -- the wildcard's mere
+presence there is enough to win and block fallback to the ancestor grant,
+for every caller, regardless of what else they hold. Only *within* the one
+section that wins do a caller's matching roles combine (most permissive of
+just those).
+
+`COPY`/`MOVE` are checked **recursively**: every
 access-file section nested under the source (for `COPY`'s read check) or
 destination (write, for both `COPY` and `MOVE`) path must also grant the
 required access, not just the top-level path -- otherwise copying a
