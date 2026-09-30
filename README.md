@@ -126,6 +126,28 @@ authenticated at all (enforced by Apache before this module ever runs) --
 `MERGE` finalizes a commit whose per-path writes were already checked as
 they happened, on the preceding `!svn/txr/...` requests.
 
+### Access probe
+
+A client can ask whether it *would* be allowed a method on a path, without
+attempting it, by sending `HEAD` with an `X-Authz-Method` header naming
+that method:
+
+```sh
+curl -I -H 'X-Authz-Method: PUT' https://host/svn/demo1/trunk/file.txt
+```
+
+The path is then checked with that method's access requirement instead of
+`HEAD`'s: `PUT` (or any other plain write method) checks write, `DELETE`
+recursive write, and `COPY` recursive read of the path itself. `403` means
+denied; anything else means the check passed -- including `404` for a path
+that doesn't exist yet, since authorization runs before mod_dav_svn and is
+purely path-based.
+
+The header can only make the check stricter: `HEAD` alone already needs the
+weakest access there is (non-recursive read). It's honored only on `HEAD`
+requests, and naming `OPTIONS` or `MERGE` (which skip the role check
+entirely) is ignored.
+
 ## In-repo access file
 
 The access file is meant to live inside the repository itself (e.g.

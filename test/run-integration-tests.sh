@@ -135,6 +135,24 @@ code="$(status_as readeruser readpass GET http://localhost/svn/demo1/trunk/file.
 code="$(dex curl -s -o /dev/null -w '%{http_code}' -I -u readeruser:readpass http://localhost/svn/demo1/trunk/file.txt)"
 [ "$code" = "200" ] && pass "readeruser can also HEAD that same file" || fail "readeruser HEAD expected 200, got $code"
 
+echo "==> HEAD access probe (X-Authz-Method)"
+probe_as() {
+    local user="$1" pass="$2" method="$3" url="$4"
+    dex curl -s -o /dev/null -w '%{http_code}' -I -u "$user:$pass" -H "X-Authz-Method: $method" "$url"
+}
+code="$(probe_as readeruser readpass PUT http://localhost/svn/demo1/trunk/file.txt)"
+[ "$code" = "403" ] && pass "readeruser write probe on a readable file is denied" || fail "expected 403, got $code"
+code="$(probe_as devuser devpass PUT http://localhost/svn/demo1/trunk/file.txt)"
+[ "$code" = "200" ] && pass "devuser write probe on /trunk/file.txt is allowed" || fail "expected 200, got $code"
+# The check runs before mod_dav_svn, so a passing probe on a path that
+# doesn't exist yet reaches mod_dav_svn and comes back 404, not 403.
+code="$(probe_as devuser devpass PUT http://localhost/svn/demo1/trunk/not-yet-created.txt)"
+[ "$code" = "404" ] && pass "devuser write probe on a not-yet-created path passes authz (404)" || fail "expected 404, got $code"
+code="$(probe_as devuser devpass DELETE http://localhost/svn/demo1/trunk)"
+[ "$code" = "403" ] && pass "devuser recursive-write probe on /trunk is denied (nested /trunk/locked deny)" || fail "expected 403, got $code"
+code="$(probe_as readeruser readpass OPTIONS http://localhost/svn/demo1/trunk/locked/secret.txt)"
+[ "$code" = "403" ] && pass "an exempt method in the probe header can't bypass the read check" || fail "expected 403, got $code"
+
 echo "==> Query string on the request URI"
 # Apache splits the query string out of r.uri before any module (including
 # mod_lua) ever sees it -- r.uri is always just the decoded path -- but

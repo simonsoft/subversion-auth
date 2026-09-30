@@ -401,6 +401,48 @@ describe("access_needed_for_method", function()
     end)
 end)
 
+describe("effective_method", function()
+    local function method_for(method, header)
+        local headers = {}
+        if header ~= nil then
+            headers["X-Authz-Method"] = header
+        end
+        return effective_method(make_request(method, nil, nil, headers))
+    end
+
+    it("uses the request's own method when no header is sent", function()
+        assert.are.equal("HEAD", method_for("HEAD", nil))
+        assert.are.equal("PUT", method_for("PUT", nil))
+    end)
+
+    it("substitutes the header's method on HEAD", function()
+        assert.are.equal("PUT", method_for("HEAD", "PUT"))
+        assert.are.equal("DELETE", method_for("HEAD", "DELETE"))
+    end)
+
+    it("normalizes case and surrounding whitespace", function()
+        assert.are.equal("PUT", method_for("HEAD", "  put "))
+    end)
+
+    it("ignores the header on any method other than HEAD", function()
+        -- Most importantly on GET: mod_dav_svn's per-child subrequests are
+        -- issued as GET and inherit the parent request's headers.
+        assert.are.equal("GET", method_for("GET", "PUT"))
+        assert.are.equal("PUT", method_for("PUT", "GET"))
+        assert.are.equal("DELETE", method_for("DELETE", "OPTIONS"))
+    end)
+
+    it("ignores an exempt method, which would skip the role check", function()
+        assert.are.equal("HEAD", method_for("HEAD", "OPTIONS"))
+        assert.are.equal("HEAD", method_for("HEAD", "merge"))
+    end)
+
+    it("ignores an empty header", function()
+        assert.are.equal("HEAD", method_for("HEAD", ""))
+        assert.are.equal("HEAD", method_for("HEAD", "   "))
+    end)
+end)
+
 describe("load_rules", function()
     it("returns no rules (fail closed) when the cache file doesn't exist", function()
         assert.are.same({}, load_rules("/nonexistent/dir", "demo1"))
@@ -552,6 +594,52 @@ describe("authz_check_access", function()
             { Destination = "/svn/other-repo/!svn/txr/0-a/branches-copy" }
         )
         assert.are.equal(HTTP_FORBIDDEN, authz_check_access(r))
+    end)
+
+    describe("HEAD access probe (X-Authz-Method)", function()
+        local function probe(roles, path, method)
+            return authz_check_access(make_request("HEAD", "/svn/demo1" .. path, env(roles), { ["X-Authz-Method"] = method }))
+        end
+
+        it("denies a write probe to a read-only role that plain HEAD allows", function()
+            assert.are.equal(OK, authz_check_access(make_request("HEAD", "/svn/demo1/trunk/file.txt", env("readers"))))
+            assert.are.equal(HTTP_FORBIDDEN, probe("readers", "/trunk/file.txt", "PUT"))
+        end)
+
+        it("allows a write probe the caller's role grants", function()
+            assert.are.equal(OK, probe("developers", "/trunk/file.txt", "PUT"))
+        end)
+
+        it("allows a write probe on a path that doesn't exist yet", function()
+            -- Authorization is path-based only; the module never consults
+            -- the repository, so a not-yet-created path is judged by the
+            -- nearest ancestor section like any other.
+            assert.are.equal(OK, probe("developers", "/trunk/new-dir/new-file.txt", "PUT"))
+        end)
+
+        it("checks recursively for a recursive-write probe", function()
+            -- developers can write /trunk itself, but /trunk/locked denies
+            -- them, so a DELETE of /trunk would be refused.
+            assert.are.equal(OK, probe("developers", "/trunk", "PUT"))
+            assert.are.equal(HTTP_FORBIDDEN, probe("developers", "/trunk", "DELETE"))
+        end)
+
+        it("checks recursive read for a COPY probe, without needing a Destination", function()
+            assert.are.equal(OK, probe("developers", "/branches", "COPY"))
+            assert.are.equal(HTTP_FORBIDDEN, probe("developers", "/trunk", "COPY"))
+        end)
+
+        it("cannot weaken HEAD's own read check via an exempt method", function()
+            -- readers has no access at all to /access.accs; OPTIONS would
+            -- skip the role check entirely if it were honored.
+            assert.are.equal(HTTP_FORBIDDEN, probe("readers", "/access.accs", "OPTIONS"))
+            assert.are.equal(HTTP_FORBIDDEN, probe("readers", "/access.accs", "MERGE"))
+        end)
+
+        it("cannot weaken a real write request via the header", function()
+            local r = make_request("PUT", "/svn/demo1/trunk/file.txt", env("readers"), { ["X-Authz-Method"] = "GET" })
+            assert.are.equal(HTTP_FORBIDDEN, authz_check_access(r))
+        end)
     end)
 
     it("refuses a legacy DAV URI regardless of role", function()

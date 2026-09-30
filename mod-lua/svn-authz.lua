@@ -322,6 +322,40 @@ function access_needed_for_method(method)
     return { write = true, recursive = true }
 end
 
+-- Access probe: a HEAD request may name, in this header, the method whose
+-- access requirement should be checked instead of HEAD's own, so a client
+-- can ask e.g. "could I PUT here?" without attempting the write --
+-- "X-Authz-Method: PUT" checks write, DELETE recursive write, COPY
+-- recursive read of the path itself. 403 means denied; anything else
+-- (200, or 404 for a path that doesn't exist yet) means the check passed.
+--
+-- This can only ever make the check stricter, never looser: HEAD already
+-- needs the weakest access there is (non-recursive read), every other
+-- method needs at least that, and an unrecognized one gets the strictest
+-- default in access_needed_for_method(). The exceptions are the
+-- EXEMPT_METHODS, which skip the role check entirely -- naming one of
+-- those is ignored, so HEAD's own read check still applies. Only honored
+-- on HEAD itself: an override on a real write method could weaken it, and
+-- mod_dav_svn's per-child subrequests (directory listings etc.) inherit
+-- the parent request's headers but are issued as GET, so they're
+-- unaffected.
+local AUTHZ_METHOD_HEADER = "X-Authz-Method"
+
+function effective_method(r)
+    if r.method ~= "HEAD" then
+        return r.method
+    end
+    local requested = r.headers_in[AUTHZ_METHOD_HEADER]
+    if requested == nil then
+        return r.method
+    end
+    requested = requested:match("^%s*(.-)%s*$"):upper()
+    if requested == "" or EXEMPT_METHODS[requested] then
+        return r.method
+    end
+    return requested
+end
+
 -- Reads "<accs_dir>/<repo>.accs", written atomically by hooks/post-commit.
 -- No in-process caching: mod_lua's Lua state (and any globals in it) can
 -- persist and be reused across requests within a worker, which would risk
@@ -355,9 +389,11 @@ function authz_check_access(r)
     local rules = load_rules(accs_dir, parsed.repo)
     local roles = parse_roles(r.subprocess_env[roles_var])
 
+    local method = effective_method(r)
+
     local ok = true
-    if parsed.path ~= nil and not EXEMPT_METHODS[r.method] then
-        ok = check_access(rules, parsed.path, roles, access_needed_for_method(r.method))
+    if parsed.path ~= nil and not EXEMPT_METHODS[method] then
+        ok = check_access(rules, parsed.path, roles, access_needed_for_method(method))
     end
 
     if ok and (r.method == "COPY" or r.method == "MOVE") then
@@ -377,7 +413,11 @@ function authz_check_access(r)
     end
 
     if not ok then
-        r:debug("subversion-auth: denied " .. r.method .. " " .. r.uri)
+        if method ~= r.method then
+            r:debug("subversion-auth: denied " .. r.method .. " (as " .. method .. ") " .. r.uri)
+        else
+            r:debug("subversion-auth: denied " .. r.method .. " " .. r.uri)
+        end
         return HTTP_FORBIDDEN
     end
     return OK
